@@ -1,0 +1,21 @@
+# Most of the heavy lifting for this project happens in Colab (see notebooks/),
+# where installs are pinned inline in the setup cell so the notebook stays
+# reproducible on its own. This file is for local/dev work outside Colab
+# (e.g. writing scorer code, inspecting downloaded artifacts).
+
+transformers>=4.46
+accelerate
+huggingface_hub
+datasets
+sentencepiece
+protobuf
+torch
+
+# Quantization backends -- only needed locally if you're testing quantization
+# code outside Colab; installing all of these on a machine without a GPU
+# is unnecessary for most local dev tasks.
+bitsandbytes
+hqq
+autoawq
+gptqmodel
+auto-round

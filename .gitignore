@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights and quantized checkpoints -- these are large binaries that
+# belong in Google Drive (per the notebook), never in git.
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+models/
+checkpoints/
+quantized/
+
+# Downloaded benchmark data -- re-downloadable from source, don't commit it.
+benchmarks/
+data/
+
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
