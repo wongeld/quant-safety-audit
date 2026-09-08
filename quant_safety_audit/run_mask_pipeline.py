@@ -73,6 +73,12 @@ JUDGE_MODEL_ID = os.environ.get("QSA_JUDGE_MODEL", "Qwen/Qwen2.5-14B-Instruct")
 MASK_ARCHETYPE = os.environ.get("QSA_MASK_ARCHETYPE", "known_facts")
 N_ITEMS = int(os.environ.get("QSA_N_ITEMS", "5"))
 
+# Matches scripts/quantize_models.py's GGUF_FILENAME -- was hardcoded to the
+# Qwen filename here before, which would have silently looked for a Qwen
+# GGUF file even after switching QSA_BASE_MODEL to Llama. Now driven by the
+# same env var so both scripts stay in sync when the base model changes.
+GGUF_FILENAME = os.environ.get("QSA_GGUF_FILENAME", "Qwen2.5-3B-Instruct-Q4_K_M.gguf")
+
 os.makedirs(f"{OUTPUT_DIR}/models", exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -84,7 +90,7 @@ MODEL_VARIANTS = {
     "gptq-int4":      {"method": "gptq",      "path": f"{OUTPUT_DIR}/models/gptq-int4"},
     "awq-int4":       {"method": "awq",       "path": f"{OUTPUT_DIR}/models/awq-int4"},
     "autoround-int4": {"method": "autoround", "path": f"{OUTPUT_DIR}/models/autoround-int4"},
-    "gguf-q4km":      {"method": "gguf",      "path": f"{OUTPUT_DIR}/models/gguf/Qwen2.5-3B-Instruct-Q4_K_M.gguf"},
+    "gguf-q4km":      {"method": "gguf",      "path": f"{OUTPUT_DIR}/models/gguf/{GGUF_FILENAME}"},
 }
 
 log("=" * 70)
@@ -114,8 +120,8 @@ for name, spec in MODEL_VARIANTS.items():
 
 if missing:
     log("ERROR: the following checkpoints are missing. This script does not")
-    log("self-quantize -- run the setup/quantization notebook on this machine")
-    log("first (or sync the checkpoints here), then re-run this script.")
+    log("self-quantize -- run scripts/quantize_models.py first (with the same")
+    log("QSA_OUTPUT_DIR / QSA_BASE_MODEL env vars set), then re-run this script.")
     for name, path in missing:
         log(f"  {name}: {path}")
     sys.exit(1)
