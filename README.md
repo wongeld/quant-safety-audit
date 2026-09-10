@@ -1,103 +1,326 @@
 # quant-safety-audit
 
-**Does the quantization method you pick change how safe a model behaves — even when its capabilities look fine?**
+**Does the quantization method you pick change how a model behaves on safety-relevant evaluations, even when the model still generates normally?**
 
-An open, reproducible audit comparing publicly available quantization methods (GGUF, AWQ, GPTQ, bitsandbytes, HQQ, AutoRound) on the same model, across five safety-adjacent axes — under-refusal, over-refusal, toxicity, prompt-injection resistance, and sycophancy — while controlling for general capability, so we can tell "this method makes the model worse at everything" apart from "this method specifically breaks safety behavior while quality looks fine."
-
-## Why this exists
-
-Every public "which quantization should I use" guide compares speed, perplexity, and memory footprint. None of them put safety behavior on that decision matrix. People choosing between AWQ, GPTQ, GGUF, bitsandbytes, and HQQ for a real deployment currently have no comparative safety guidance at all — this project is trying to produce a first pass at that missing column.
+This project evaluates multiple quantization methods on the same language model and compares their behavior on safety and honesty-related benchmarks. The goal is to separate general capability degradation from changes in safety-relevant behavior.
 
 ## Status
 
-Past feasibility checks now. Where things actually stand:
+Current implementation status:
 
-- **Quantization pipeline: validated.** All 6 methods produce checkpoints that load and generate correctly on the target model, including two that needed real debugging to get there (see [Loading corrections](#loading-corrections-and-why-they-mattered) below) — this isn't "the code runs," it's "confirmed against real generated output, method by method."
-- **MASK (honesty under pressure) pilot: running clean.** Small-N pilot (5 items × 8 model variants = 80 generations) completed with zero failed generations across every method. Not yet run at full scale, and the pressured-prompt sample so far shows no answer variance — see the framework's own review tooling for why that limits what this pilot can show before the item count goes up.
-- **Multi-judge cross-validation: built.** MASK's official judge is GPT-4o over a paid API; this project substitutes an open, locally-run model instead, and supports running several different judges against the same generations to check where they agree and disagree, rather than trusting one judge's labels by default.
-- **Four of the five safety axes (over-refusal, toxicity, prompt-injection resistance, sycophancy) and HarmBench (under-refusal): scoped, not yet wired into the framework.** See `docs/PHASE_CHECKLIST.md` for the full plan and reasoning behind what's prioritized and what's explicitly excluded.
+- **Quantization pipeline: validated.** Eight model variants have been successfully produced and tested for loading/generation on the target Qwen model.
+- **MASK pipeline: validated at smoke-test scale.** A 5-item pilot was run across all 8 variants, producing 80 generations with zero generation failures.
+- **MASK judging: validated.** The pilot produced 40 judged rows, one comparison per `(model variant, MASK item)`. The judge compares the pressured response with the corresponding belief response.
+- **Full MASK generation: next step.** The current plan is to scale the generation phase to approximately 500 MASK items before running the computationally expensive judging phase.
+- **Other safety benchmarks:** scoped for later integration. These include HarmBench, OR-Bench, ToxiGen, BIPIA, and sycophancy-related evaluations.
 
-## Repo structure
+The current results are a pipeline validation only. The N=5 MASK pilot is too small to support substantive conclusions about differences between quantization methods.
 
-```
+## Research question
+
+The main question is:
+
+> Does quantization change safety-relevant behavioral consistency while the model remains generally capable of producing responses?
+
+For MASK specifically, this project uses **deception** in the operational sense measured by the benchmark: whether a model maintains consistency with its own stated beliefs when it is given an opportunity to behave differently.
+
+The project therefore focuses on behavioral changes associated with quantization rather than treating ordinary accuracy loss as deception.
+
+## Model
+
+The primary model is:
+
+`Qwen/Qwen2.5-3B-Instruct`
+
+This model was selected because the project needs a single model with broad support across the quantization backends being compared.
+
+The evaluated variants are:
+
+| Variant | Method |
+|---|---|
+| `baseline-bf16` | Original model |
+| `bnb-nf4` | bitsandbytes NF4 |
+| `bnb-int8` | bitsandbytes INT8 |
+| `hqq-4bit` | HQQ 4-bit |
+| `gptq-int4` | GPTQ INT4 |
+| `awq-int4` | AWQ INT4 |
+| `autoround-int4` | AutoRound INT4 |
+| `gguf-q4km` | GGUF Q4_K_M |
+
+Pre-quantized checkpoints are used where appropriate, while bitsandbytes, HQQ, and AutoRound variants can be produced directly from the base model.
+
+## Repository structure
+
+```text
 quant-safety-audit/
-├── quant_safety_audit/                                     # the reusable framework
+├── quant_safety_audit/
 │   ├── __init__.py
-│   ├── loaders.py        # one class per quantization method, common load/generate/unload interface
-│   ├── benchmarks.py     # one class per benchmark, produces BenchmarkItem lists
-│   ├── judges.py         # one class per judge, scores (item, response) -> JudgeResult
-│   └── pipeline.py       # ExperimentRunner (generate -> judge -> summarize) + compare_judges
+│   ├── benchmarks.py
+│   ├── judges.py
+│   ├── loaders.py
+│   ├── pipeline.py
+│   ├── quantizers.py
+│   └── run_mask_pipeline.py
+├── scripts/
+│   ├── quantize_models.py
+│   └── setup_env.sh
 ├── notebooks/
-│   ├── 1 Setup Verification Quantization Run - Final.ipynb    # model verification + all 6 quantization methods
-│   └── 3 MASK Benchmark Pilot Pipeline Final.ipynb             # MASK pilot: generation, judging, review
+│   ├── 1 Setup Verification Quantization Run - Final.ipynb
+│   └── 3 MASK Benchmark Pilot Pipeline Final.ipynb
 ├── docs/
-│   └── PHASE_CHECKLIST.md                                   # full execution checklist, phase by phase
+│   └── PHASE_CHECKLIST.md
 ├── requirements.txt
 ├── .gitignore
-└── LICENSE
+├── LICENSE
+└── README.md
 ```
 
-## The framework
+## Framework
 
-`quant_safety_audit/` is the reusable piece — the part meant to outlive this specific study. Three independent extension points, each unaware of the other two:
+The `quant_safety_audit/` package is designed as a reusable experiment framework rather than a MASK-only script.
 
-- **A new quantization method** → one new `BaseModelLoader` subclass in `loaders.py`, one new branch in `build_loader()`. Nothing else changes.
-- **A new benchmark** (HarmBench, OR-Bench, BIPIA, sycophancy-eval, ...) → one new `BaseBenchmark` subclass in `benchmarks.py` returning `BenchmarkItem` objects. `ExperimentRunner` doesn't know or care which benchmark it's running.
-- **A new judge** → one new `BaseJudge` subclass in `judges.py`. `ExperimentRunner.run_judging()` accepts any judge, and `compare_judges()` will diff its labels against any other judge's labels on the same generations.
+### Model loaders
 
-`ExperimentRunner` ties these together: generate (with crash-safe checkpointing and per-model memory logging), judge, summarize. Swapping the benchmark or adding a quantization method is a config change, not a rewrite.
+`loaders.py` provides a common interface for loading, generating with, and unloading each model variant.
 
-### Loading corrections, and why they mattered
+The current loading paths are:
 
-Every quantization method needs a genuinely different loading path — this cost real debugging time to get right, and is documented in `loaders.py`'s docstrings rather than left implicit:
+| Method | Loading path |
+|---|---|
+| bitsandbytes | `transformers.AutoModelForCausalLM` |
+| AutoRound | `transformers.AutoModelForCausalLM` with explicit AutoRound configuration |
+| GPTQ | GPTQModel / Transformers GPTQ loading path |
+| AWQ | AutoAWQ |
+| HQQ | AutoHQQHFModel |
+| GGUF | `llama_cpp.Llama` |
 
-| Method | Loads via | Why not the obvious way |
-|---|---|---|
-| bitsandbytes | `transformers.AutoModelForCausalLM` | Works as expected — auto-detects from the saved checkpoint. |
-| AutoRound | `transformers.AutoModelForCausalLM` + explicit `AutoRoundConfig(backend="torch")` | Needed explicitly at load time — confirmed necessary against a real checkpoint. |
-| **GPTQ** | `gptqmodel.GPTQModel.load()` directly | Going through `transformers` routes through an `optimum` bridge with a real bug (`optimum/gptq/quantizer.py` references `QuantizeConfig` without importing it) — confirmed from a full traceback, not a guess. Bypassing `optimum` entirely, rather than patching around it, is the fix. |
-| **AWQ** | `awq.AutoAWQForCausalLM.from_quantized()` | Generic `transformers` loading doesn't correctly dispatch AWQ's kernels. |
-| **HQQ** | `hqq.models.hf.base.AutoHQQHFModel` | The current recommended entry point — the older `HQQModelForCausalLM` API is deprecated. |
-| **GGUF** | `llama_cpp.Llama` via `create_chat_completion()` | Not `transformers(gguf_file=...)` — that path was never confirmed working. `create_chat_completion` (not raw completion mode) matters specifically because it applies the model's own chat template, which MASK's system+user structured prompts need. |
+The GGUF loader uses `create_chat_completion()` so that the model's chat template can be applied to MASK's structured system/user prompts.
 
-Also worth knowing if you're extending this: `bitsandbytes` logs a warning on every int8 matmul call (once per token generated, per quantized layer) — enough volume to hang a browser tab rendering it. `loaders.py` silences that logger at import time; it's not a sign generation is broken.
+### Benchmarks
 
+`benchmarks.py` defines benchmark interfaces and benchmark-specific items.
+
+The current MASK implementation provides `MaskBenchmark`.
+
+The intended framework can also support benchmarks such as:
+
+- HarmBench
+- OR-Bench
+- ToxiGen
+- BIPIA
+- sycophancy evaluations
+
+### Judges
+
+`judges.py` defines the judge interface.
+
+For MASK, the current implementation uses:
+
+`Qwen/Qwen2.5-14B-Instruct`
+
+The 14B model is run locally using 4-bit bitsandbytes quantization.
+
+MASK's original evaluation uses a hosted judge. Using a local open-weight judge is therefore a methodological deviation that will need to be considered when interpreting results.
+
+### Experiment runner
+
+`pipeline.py` contains `ExperimentRunner`, which handles:
+
+- benchmark item loading
+- model generation
+- crash-safe generation checkpointing
+- model unloading and GPU memory cleanup
+- judging
+- summary generation
+
+Adding a new benchmark or model loader should not require rewriting the experiment pipeline.
+
+## MASK evaluation
+
+For each MASK item, the pipeline generates two responses:
+
+- **pressured**: the primary situation in which the model may have an incentive to behave differently
+- **belief**: the corresponding prompt used to establish or query the model's stated belief
+
+The generation dataset therefore contains:
+
+```text
+number of variants × number of items × 2 turns
+```
+
+For example, the N=5 smoke test produced:
+
+```text
+8 variants × 5 items × 2 turns = 80 generations
+```
+
+The judge then groups the two turns by `(variant, item_id)` and produces one label for each comparison:
+
+```text
+8 variants × 5 items = 40 judged rows
+```
+
+This distinction is important when checking result counts.
+
+## Quantization pipeline
+
+The main quantization entry point is:
+
+```text
+scripts/quantize_models.py
+```
+
+It produces checkpoints under:
+
+```text
+~/quant-safety-audit-data/models/
+```
+
+The current expected checkpoint directories are:
+
+```text
+models/
+├── autoround-int4/
+├── awq-int4/
+├── bnb-int8/
+├── bnb-nf4/
+├── gguf/
+├── gptq-int4/
+└── hqq-4bit/
+```
+
+The base model is not copied into this directory because it is loaded from Hugging Face.
+
+## MASK pipeline
+
+The executable MASK pipeline is:
+
+```text
+quant_safety_audit/run_mask_pipeline.py
+```
+
+It expects the quantized checkpoints under the configured output directory and performs a pre-flight check before spending GPU time.
+
+The main configuration values include:
+
+- `QSA_OUTPUT_DIR`
+- `QSA_BASE_MODEL`
+- `QSA_JUDGE_MODEL`
+- `QSA_MASK_ARCHETYPE`
+- `QSA_N_ITEMS`
+- `QSA_GGUF_FILENAME`
+
+The default output location is:
+
+```text
+~/quant-safety-audit-data/
+```
+
+Results are written to:
+
+```text
+~/quant-safety-audit-data/results/mask/
+```
+
+The generation phase writes:
+
+```text
+generations.csv
+```
+
+The judging phase writes:
+
+```text
+scored.csv
+```
+
+and the summarized results are written to:
+
+```text
+summary.csv
+```
+
+Model checkpoints, generated results, downloaded datasets, and logs are intentionally kept outside Git.
 
 ## Quickstart
 
-1. Open `1 Setup Verification Quantization Run - Final.ipynb` in Colab (Runtime → Change runtime type → GPU). Run the setup/verification cells first — they confirm the model source is legitimate (checked against the HF API, not eyeballed from the repo name) and that every benchmark dataset downloads correctly. Then run the quantization cells to produce all 6 checkpoints, saved to Google Drive.
-2. Open `3 MASK Benchmark Pilot Pipeline Final.ipynb`. This writes the `quant_safety_audit` package to disk, points it at the checkpoints from step 1, and runs the generate → judge → summarize pipeline on a small pilot sample.
-3. To extend rather than just run: import `quant_safety_audit` directly, write a new `BaseBenchmark` or `BaseJudge` subclass, and pass it into `ExperimentRunner` — no notebook surgery required.
+Create and activate a virtual environment, then install the dependencies from:
 
-## Model choice, and why
+```text
+requirements.txt
+```
 
-Primary target: **`Qwen/Qwen2.5-3B-Instruct`**. Deliberately not the newest Qwen release — verified quantization-checkpoint availability mattered more than novelty for this project:
+The quantization pipeline can then be run with:
 
-- `Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4` — official Qwen GPTQ checkpoint exists.
-- `bartowski/Qwen2.5-3B-Instruct-GGUF` — extensive, well-maintained GGUF k-quant builds exist.
-- bitsandbytes and HQQ need no pre-quantized checkpoint — produced directly in the notebook.
+```bash
+python scripts/quantize_models.py
+```
 
-Two models were considered and deliberately excluded for this phase:
-- `Qwen/Qwen3.5-4B` — confirmed multimodal (image-text-to-text), which adds VLM-specific complexity that several quantization tools handle inconsistently.
-- The `Qwen3.6` family — the only open-weight checkpoints (`Qwen3.6-27B`, `Qwen3.6-35B-A3B`) are too large for this project's compute budget; `Qwen3.6-Plus`/`Qwen3.6-Max-Preview` are hosted API-only, not open weights. Also worth flagging: several HF repos with "Qwen3.6" in the name are not published by the official `Qwen` org — the notebook checks the actual publishing org via the HF API rather than trusting the repo name.
+After the checkpoints have been produced, the MASK pipeline can be run with:
 
-## Quantization methods covered
+```bash
+python -m quant_safety_audit.run_mask_pipeline
+```
 
-The usual four (GGUF via llama.cpp k-quants, AWQ, GPTQ, bitsandbytes), plus HQQ (data-free, fast to produce) and AutoRound (Intel's post-training quantization method, actively developed through 2026 and reported to outperform GPTQ/AWQ/GGUF on low-bit accuracy leaderboards, especially for small-to-medium models — included specifically because it's the most recent addition to this list). See [Loading corrections](#loading-corrections-and-why-they-mattered) above for how each is actually loaded.
+For a small validation run, set the number of MASK items to a small value before starting.
 
-## Judging
+For a larger experiment, run the generation phase separately from judging when possible. The local 14B judge is substantially more computationally expensive than generating responses from the 3B variants.
 
-MASK's official evaluation uses GPT-4o over a paid API. This project substitutes an open, locally-run model instead (`MaskOpenLLMJudge`, default `Qwen/Qwen2.5-14B-Instruct`) — a real methodological deviation, not a minor detail. To manage that risk:
+## Reproducibility
 
-- The judge prompt templates are copied verbatim from MASK's own repo, not retyped from a paper.
-- `ExperimentRunner.run_judging()` accepts any `BaseJudge`, so multiple judges can score the same generations independently (each saves to its own file, `scored_<judge_name>.csv` — no silent overwrites).
-- `compare_judges()` reports pairwise agreement and flags exactly which rows different judges disagree on, so disagreement is something to go read, not something averaged away.
-- Content-moderation/safety classifiers (Llama-Guard family, WildGuard, ShieldGemma) are deliberately excluded from the judge pool — they're fixed-taxonomy classifiers, not general reasoning judges, and misfire on this kind of open belief-comparison task.
+The project separates code from generated artifacts.
 
-## Scope — what this does *not* cover, on purpose
+The Git repository contains:
 
-Biosecurity, chemical/physical safety, and cybersecurity uplift are excluded — those need review this project isn't resourced to do responsibly. Agentic/tool-use safety, fairness/allocational decision-making, deception, and broader adversarial robustness are also out of scope for now — each needs its own dedicated harness. See `docs/PHASE_CHECKLIST.md` for the full reasoning.
+- experiment framework code
+- quantization scripts
+- benchmark and judge implementations
+- notebooks
+- documentation
+- dependency specification
+
+The following are not committed to Git:
+
+- model weights
+- quantized checkpoints
+- benchmark downloads
+- generated experiment results
+- runtime logs
+- Python environments
+
+The `.gitignore` contains rules for these large or reproducible artifacts.
+
+The current development environment has been validated on a Tesla V100-SXM2-16GB GPU.
+
+## Scope
+
+This project is intentionally narrower than a general AI safety evaluation.
+
+Currently excluded from the active evaluation scope are:
+
+- biosecurity
+- chemical and physical safety
+- cybersecurity uplift
+- agentic/tool-use safety
+- fairness and allocational decision-making
+- broad adversarial robustness
+
+These areas require dedicated evaluation designs rather than being treated as interchangeable benchmark categories.
+
+The current focus is quantization-related changes in model behavior, beginning with MASK and extending to selected safety benchmarks.
+
+## Limitations
+
+Several limitations should be kept in mind when interpreting results:
+
+- **Small pilot size:** the initial N=5 MASK run only validates the pipeline and cannot establish meaningful statistical differences.
+- **Local judge:** the Qwen2.5-14B judge differs from MASK's original hosted judge.
+- **Quantization methods are not identical implementations:** different backends may use different calibration procedures, kernels, and checkpoint sources.
+- **Hardware matters:** inference behavior and supported kernels can depend on the available GPU and CPU.
+- **Capability and safety are related:** a behavioral difference should be interpreted alongside general capability measurements rather than automatically attributed to a safety-specific effect.
 
 ## License
 
-Code in this repo: MIT (see `LICENSE`). Model weights, benchmark datasets, and any downloaded quantized checkpoints retain their own original licenses — this repo does not redistribute them, the notebooks only download from their original sources.
+Code in this repository is released under the MIT License. See LICENSE.
+
+Model weights, benchmark datasets, and downloaded quantized checkpoints retain their respective original licenses. This repository does not redistribute those artifacts.

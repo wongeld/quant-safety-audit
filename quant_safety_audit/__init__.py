@@ -17,10 +17,10 @@ from .quantizers import (
     BaseQuantizer, build_quantizer,
     BnbQuantizer, HqqQuantizer, GptqQuantizer, AwqQuantizer, AutoRoundQuantizer, GgufDownloader,
 )
-from .loaders import BaseModelLoader, build_loader, TransformersLoader, GptqLoader, AwqLoader, HqqLoader, GgufLlamaCppLoader
+from .loaders import BaseModelLoader, build_loader, TransformersLoader, AwqLoader, HqqLoader, GgufLlamaCppLoader
 from .benchmarks import BaseBenchmark, BenchmarkItem, MaskBenchmark, parse_proposition
 from .judges import BaseJudge, JudgeResult, MaskOpenLLMJudge
-from .pipeline import ExperimentRunner, compare_judges
+from .pipeline import ExperimentRunner
 
 __all__ = [
     "BaseQuantizer", "build_quantizer",

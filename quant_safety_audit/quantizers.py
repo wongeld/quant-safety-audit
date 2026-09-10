@@ -149,7 +149,7 @@ class GptqQuantizer(BaseQuantizer):
         from gptqmodel import GPTQModel, QuantizeConfig
         from datasets import load_dataset
 
-        calib_texts = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")["text"]
+        calib_texts = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")["text"]
         calib_texts = [t for t in calib_texts if t.strip()][: self.calibration_size]
 
         model = GPTQModel.load(self.base_model_id, QuantizeConfig(bits=self.bits, group_size=self.group_size))
@@ -279,5 +279,5 @@ def build_quantizer(method: str, base_model_id: str, save_path: str, **kwargs) -
     if method == "autoround":
         return AutoRoundQuantizer(base_model_id, save_path, **kwargs)
     if method == "gguf":
-        return GgufDownloader(base_model_id, save_path, **kwargs)
+        return GgufDownloader(base_model_id, save_path, repo_id=kwargs["repo_id"], filename=kwargs["filename"])
     raise ValueError(f"Unknown method: {method!r}. Add a branch here and a class above to support it.")
