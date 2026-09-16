@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Run the MASK honesty pilot end to end, unattended -- safe to launch under
-tmux and walk away from. No notebook, no interactive prompts.
+Run the MASK honesty benchmark end to end, unattended -- safe to launch
+under tmux and walk away from. No notebook, no interactive prompts.
 
 Requires:
     HF_TOKEN environment variable set (MASK's dataset is gated on Hugging
@@ -10,21 +10,28 @@ Requires:
     respond to it. Set it before running:
         export HF_TOKEN=hf_xxxxxxxx
 
-Config (all optional, sensible defaults matching the notebooks):
+Config (all optional):
     QSA_OUTPUT_DIR      where checkpoints/results live (default: ~/quant-safety-audit-data)
     QSA_BASE_MODEL      base model id (default: Qwen/Qwen2.5-3B-Instruct)
     QSA_JUDGE_MODEL     judge model id (default: Qwen/Qwen2.5-14B-Instruct)
     QSA_MASK_ARCHETYPE  MASK archetype (default: known_facts)
-    QSA_N_ITEMS         number of MASK items to run (default: 5)
+    QSA_N_ITEMS         number of MASK items to run (default: 500). Set to
+                        "all" (or "0") to run the full split.
+    QSA_RUN_JUDGING     "1" to run the judging phase after generation,
+                        "0" (default) to generate only and stop there.
+                        Default is off: a 16GB V100 is not a good fit for a
+                        14B judge model, and this project is about to move
+                        to different hardware -- generate now, judge later
+                        wherever that ends up making more sense.
 
 Run with `python -u` (unbuffered) so a log file updates in real time rather
 than only flushing in large chunks:
     python -u scripts/run_mask_pipeline.py 2>&1 | tee -a logs/mask_run_$(date +%Y%m%d_%H%M%S).log
 
 This script does NOT self-quantize -- it expects the 6 quantized checkpoints
-to already exist under QSA_OUTPUT_DIR/models/ (produced by the setup/
-quantization notebook, run once on this same machine). It checks for them
-and fails loudly, before spending any GPU time, if any are missing.
+to already exist under QSA_OUTPUT_DIR/models/ (produced by
+scripts/quantize_models.py, run once on this same machine). It checks for
+them and fails loudly, before spending any GPU time, if any are missing.
 """
 import os
 import sys
@@ -71,12 +78,17 @@ RESULTS_DIR = f"{OUTPUT_DIR}/results/mask"
 BASE_MODEL_ID = os.environ.get("QSA_BASE_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 JUDGE_MODEL_ID = os.environ.get("QSA_JUDGE_MODEL", "Qwen/Qwen2.5-14B-Instruct")
 MASK_ARCHETYPE = os.environ.get("QSA_MASK_ARCHETYPE", "known_facts")
-N_ITEMS = int(os.environ.get("QSA_N_ITEMS", "5"))
 
-# Matches scripts/quantize_models.py's GGUF_FILENAME -- was hardcoded to the
-# Qwen filename here before, which would have silently looked for a Qwen
-# GGUF file even after switching QSA_BASE_MODEL to Llama. Now driven by the
-# same env var so both scripts stay in sync when the base model changes.
+# "all" (or "0") runs the full split. Any other value is parsed as an item
+# count. Default is now 500, not a small pilot number.
+_n_items_raw = os.environ.get("QSA_N_ITEMS", "1000").strip().lower()
+N_ITEMS = None if _n_items_raw in ("all", "0", "") else int(_n_items_raw)
+
+# Off by default -- a 16GB V100 is a poor fit for a 14B judge model on top of
+# the target model already being loaded/unloaded, and this project is about
+# to move to different hardware anyway. Generate now, judge later.
+RUN_JUDGING = os.environ.get("QSA_RUN_JUDGING", "0").strip().lower() in ("1", "true", "yes")
+
 GGUF_FILENAME = os.environ.get("QSA_GGUF_FILENAME", "Qwen2.5-3B-Instruct-Q4_K_M.gguf")
 
 os.makedirs(f"{OUTPUT_DIR}/models", exist_ok=True)
@@ -98,9 +110,11 @@ log("MASK pipeline run starting")
 log(f"  OUTPUT_DIR:     {OUTPUT_DIR}")
 log(f"  RESULTS_DIR:    {RESULTS_DIR}")
 log(f"  BASE_MODEL_ID:  {BASE_MODEL_ID}")
-log(f"  JUDGE_MODEL_ID: {JUDGE_MODEL_ID}")
 log(f"  MASK_ARCHETYPE: {MASK_ARCHETYPE}")
-log(f"  N_ITEMS:        {N_ITEMS}")
+log(f"  N_ITEMS:        {N_ITEMS if N_ITEMS is not None else 'ALL (full split)'}")
+log(f"  RUN_JUDGING:    {RUN_JUDGING}" + ("" if RUN_JUDGING else "  (generation only -- judge later on different hardware)"))
+if RUN_JUDGING:
+    log(f"  JUDGE_MODEL_ID: {JUDGE_MODEL_ID}")
 log(f"  variants:       {list(MODEL_VARIANTS.keys())}")
 log("=" * 70)
 
@@ -134,19 +148,29 @@ log("All checkpoint paths confirmed present.")
 start = time.time()
 
 benchmark = qsa.MaskBenchmark(archetype=MASK_ARCHETYPE)
-judge = qsa.MaskOpenLLMJudge(judge_model_id=JUDGE_MODEL_ID)
 
 runner = qsa.ExperimentRunner(
-    loader_configs=MODEL_VARIANTS, benchmark=benchmark, judge=judge,
+    loader_configs=MODEL_VARIANTS, benchmark=benchmark, judge=None,
     results_dir=RESULTS_DIR, n_items=N_ITEMS,
 )
 
 log("Starting generation phase...")
 raw_df = runner.run_generation()
 log(f"Generation phase complete -- {len(raw_df)} rows, {time.time() - start:.0f}s elapsed.")
+log(f"Raw generations saved under: {RESULTS_DIR}/generations.csv")
+
+if not RUN_JUDGING:
+    log("QSA_RUN_JUDGING is off -- stopping after generation.")
+    log(f"Done. Total elapsed: {time.time() - start:.0f}s.")
+    log("To judge these results later (here or on different hardware), load")
+    log(f"{RESULTS_DIR}/generations.csv and call ExperimentRunner.run_judging()")
+    log("directly, or re-run this script with QSA_RUN_JUDGING=1.")
+    sys.exit(0)
 
 log("Starting judging phase...")
 judge_start = time.time()
+judge = qsa.MaskOpenLLMJudge(judge_model_id=JUDGE_MODEL_ID)
+runner.judge = judge
 scored_df = runner.run_judging(raw_df)
 log(f"Judging phase complete -- {len(scored_df)} rows, {time.time() - judge_start:.0f}s elapsed.")
 

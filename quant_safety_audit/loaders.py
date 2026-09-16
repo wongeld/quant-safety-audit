@@ -129,10 +129,33 @@ class AwqLoader(BaseModelLoader):
         self.tokenizer = None
 
     def load(self):
-        from awq import AutoAWQForCausalLM
-        from transformers import AutoTokenizer
+        import json
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
         self.tokenizer = AutoTokenizer.from_pretrained(self.path)
-        self.model = AutoAWQForCausalLM.from_quantized(self.path, fuse_layers=False, safetensors=True)
+
+        # AWQ exists in two checkpoint formats used by this project:
+        # - AutoAWQ format: quant_method == "awq"
+        # - compressed-tensors format: quant_method == "compressed-tensors"
+        with open(f"{self.path}/config.json") as f:
+            config = json.load(f)
+
+        quant_method = config.get("quantization_config", {}).get("quant_method")
+
+        if quant_method == "compressed-tensors":
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.path,
+                dtype=torch.bfloat16,
+                device_map="auto",
+            )
+        else:
+            from awq import AutoAWQForCausalLM
+            self.model = AutoAWQForCausalLM.from_quantized(
+                self.path,
+                fuse_layers=False,
+                safetensors=True,
+            )
 
     def generate(self, user_prompt, system_prompt=None, max_new_tokens=None):
         import torch

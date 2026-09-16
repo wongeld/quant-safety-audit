@@ -57,8 +57,8 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 # that's what a real user deploying this model would actually get, and it's
 # faster than self-quantizing. Falls back to self-quantizing if none match.
 # UPDATE THESE when switching base models.
-GPTQ_CANDIDATES = [f"{BASE_MODEL_ID}-GPTQ-Int4"] if "Qwen" in BASE_MODEL_ID else []
-AWQ_CANDIDATES = [f"{BASE_MODEL_ID}-AWQ"] if "Qwen" in BASE_MODEL_ID else []
+GPTQ_CANDIDATES = [x for x in os.environ.get("QSA_GPTQ_CANDIDATES", "").split(";") if x] or ([f"{BASE_MODEL_ID}-GPTQ-Int4"] if "Qwen" in BASE_MODEL_ID else [])
+AWQ_CANDIDATES = [x for x in os.environ.get("QSA_AWQ_CANDIDATES", "").split(";") if x] or ([f"{BASE_MODEL_ID}-AWQ"] if "Qwen" in BASE_MODEL_ID else [])
 
 # GGUF has no safe auto-derivation at all -- naming varies too much by
 # uploader. UPDATE THESE when switching base models (find bartowski's or
